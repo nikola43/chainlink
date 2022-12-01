@@ -20,12 +20,14 @@ on:
       - '**/go.mod'
       - '**/go.sum'
       - '.golangci.yml'
+      - '.github/workflows/golangci-lint.yml'
   pull_request:
     paths-ignore:
       - '**.go'
       - '**/go.mod'
       - '**/go.sum'
       - '.golangci.yml'
+      - '.github/workflows/golangci-lint.yml'
 
 jobs:
   golangci:
