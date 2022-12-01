@@ -73,12 +73,13 @@ type logPoller struct {
 	backfillBatchSize int64         // batch size to use when backfilling finalized logs
 	rpcBatchSize      int64         // batch size to use for fallback RPC calls made in GetBlocks
 
-	filterMu        sync.RWMutex
-	currentFilterID int
-	filters         map[int]Filter
-	filterDirty     bool
-	cachedAddresses []common.Address
-	cachedEventSigs []common.Hash
+	filterMu              sync.RWMutex
+	currentFilterID       int
+	filters               map[int]Filter
+	filterDirty           bool
+	cachedAddresses       []common.Address
+	cachedEventSigs       []common.Hash
+	nextFinalizedBlockNum int64
 
 	replayStart    chan ReplayRequest
 	replayComplete chan error
@@ -291,10 +292,9 @@ func (lp *logPoller) getReplayFromBlock(ctx context.Context, requested int64) (i
 
 func (lp *logPoller) run() {
 	defer close(lp.done)
-	logPollPendingTick := time.After(0)
-	logPollFinalizedTick := time.After(utils.WithJitter(lp.pollPeriod))
+	logPollTick := time.After(0)
+	//logPollFinalizedTick := time.After(utils.WithJitter(lp.pollPeriod))
 	blockPruneTick := time.After(0)
-	var firstUnfinalizedBlockNumber *int64
 
 	for {
 		select {
@@ -305,7 +305,8 @@ func (lp *logPoller) run() {
 			if err == nil {
 				// Serially process replay requests.
 				lp.lggr.Warnw("Executing replay", "fromBlock", fromBlock, "requested", replayReq.fromBlock)
-				lp.pollAndSavePendingLogs(replayReq.ctx, fromBlock)
+				lp.nextFinalizedBlockNum = 0
+				lp.pollAndSaveLogs(replayReq.ctx, fromBlock)
 			} else {
 				lp.lggr.Errorw("Error executing replay, could not get fromBlock", "err", err)
 			}
@@ -318,8 +319,8 @@ func (lp *logPoller) run() {
 				continue
 			case lp.replayComplete <- err:
 			}
-		case <-logPollPendingTick:
-			logPollPendingTick = time.After(utils.WithJitter(lp.pollPeriod))
+		case <-logPollTick:
+			logPollTick = time.After(utils.WithJitter(lp.pollPeriod))
 			// Always start from the latest block in the db.
 			var start int64
 			lastProcessed, err := lp.orm.SelectLatestBlock(pg.WithParentCtx(lp.ctx))
@@ -349,17 +350,7 @@ func (lp *logPoller) run() {
 			} else {
 				start = lastProcessed.BlockNumber + 1
 			}
-			lp.pollAndSavePendingLogs(lp.ctx, start)
-			if firstUnfinalizedBlockNumber == nil {
-				firstUnfinalizedBlockNumber = new(int64)
-				*firstUnfinalizedBlockNumber = start // start backup log poller on the same first block
-			}
-		case <-logPollFinalizedTick:
-			if firstUnfinalizedBlockNumber == nil {
-				lp.lggr.Warnw("backup log poller triggered before any blocks were fetched")
-				continue
-			}
-			lp.pollAndSaveFinalizedLogs(lp.ctx, firstUnfinalizedBlockNumber)
+			lp.pollAndSaveLogs(lp.ctx, start)
 		case <-blockPruneTick:
 			blockPruneTick = time.After(lp.pollPeriod * 1000)
 			if err := lp.pruneOldBlocks(lp.ctx); err != nil {
@@ -510,34 +501,22 @@ func (lp *logPoller) getCurrentBlockMaybeHandleReorg(ctx context.Context, curren
 	return currentBlock, nil
 }
 
-func (lp *logPoller) pollAndSaveFinalizedLogs(ctx context.Context, firstUnfinalizedBlockNumber *int64) {
-	lp.lggr.Debugw("Polling for finalized logs", "firstUnfinalizedBlockNumber", firstUnfinalizedBlockNumber)
-	latestBlock, err := lp.ec.HeadByNumber(ctx, nil)
-	if err != nil {
-		lp.lggr.Warnw("Unable to get latestBlockNumber block", "err", err, "firstUnfinalizedBlockNumber", firstUnfinalizedBlockNumber)
-		return
-	}
-	latestBlockNumber := latestBlock.Number
-
-	lp.backfillFinalizedBlocks(ctx, firstUnfinalizedBlockNumber, latestBlockNumber)
-}
-
-// backfillFinalizedBlocks backfills finalized blocks if we can for performance. If we crash during backfill, we
+// backfillFinalizedLogs backfills logs from any new finalized blocks. If we crash during backfill, we
 // may reprocess logs.  Log insertion is idempotent so this is ok.
 // E.g. 1<-2<-3(currentBlockNumber)<-4<-5<-6<-7(latestBlockNumber), finality is 2. So 3,4 can be batched.
 // Although 5 is finalized, we still need to save it to the db for reorg detection if 6 is a reorg.
 // start = currentBlockNumber = 3, end = latestBlockNumber - finality - 1 = 7-2-1 = 4 (inclusive range).
-func (lp *logPoller) backfillFinalizedBlocks(ctx context.Context, currentBlockNumber *int64, latestBlockNumber int64) (ok bool) {
+func (lp *logPoller) backfillFinalizedLogs(ctx context.Context, latestBlockNumber int64) (ok bool) {
 	lastSafeBackfillBlock := latestBlockNumber - lp.finalityDepth - 1
-	if lastSafeBackfillBlock >= *currentBlockNumber {
-		lp.lggr.Infow("Backfilling logs", "start", *currentBlockNumber, "end", lastSafeBackfillBlock)
-		if err := lp.backfill(ctx, *currentBlockNumber, lastSafeBackfillBlock); err != nil {
+	if lastSafeBackfillBlock >= lp.nextFinalizedBlockNum {
+		lp.lggr.Infow("Backfilling logs", "start", lp.nextFinalizedBlockNum, "end", lastSafeBackfillBlock)
+		if err := lp.backfill(ctx, lp.nextFinalizedBlockNum, lastSafeBackfillBlock); err != nil {
 			// If there's an error backfilling, we can just return and retry from the last block saved
 			// since we don't save any blocks on backfilling. We may re-insert the same logs but thats ok.
 			lp.lggr.Errorw("Unable to backfill, retrying", "err", err)
 			return false
 		}
-		*currentBlockNumber = lastSafeBackfillBlock + 1
+		lp.nextFinalizedBlockNum = lastSafeBackfillBlock + 1
 	}
 	return true
 }
@@ -545,7 +524,7 @@ func (lp *logPoller) backfillFinalizedBlocks(ctx context.Context, currentBlockNu
 // pollAndSaveLogs On startup/crash current is the first block after the last processed block.
 // currentBlockNumber is the block from where new logs are to be polled & saved. Under normal
 // conditions this would be equal to lastProcessed.BlockNumber + 1.
-func (lp *logPoller) pollAndSavePendingLogs(ctx context.Context, currentBlockNumber int64) {
+func (lp *logPoller) pollAndSaveLogs(ctx context.Context, currentBlockNumber int64) {
 	lp.lggr.Debugw("Polling for logs", "currentBlockNumber", currentBlockNumber)
 	latestBlock, err := lp.ec.HeadByNumber(ctx, nil)
 	if err != nil {
@@ -564,33 +543,40 @@ func (lp *logPoller) pollAndSavePendingLogs(ctx context.Context, currentBlockNum
 		// Can re-use our currentBlock and avoid an extra RPC call.
 		currentBlock = latestBlock
 	}
-	// Possibly handle a reorg. For example if we crash, we'll be in the middle of processing unfinalized blocks.
-	// Returns (currentBlock || LCA+1 if reorg detected, error)
-	currentBlock, err = lp.getCurrentBlockMaybeHandleReorg(ctx, currentBlockNumber, currentBlock)
-	if err != nil {
-		// If there's an error handling the reorg, we can't be sure what state the db was left in.
-		// Resume from the latest block saved and retry.
-		lp.lggr.Errorw("Unable to get current block, retrying", "err", err)
-		return
-	}
-	currentBlockNumber = currentBlock.Number
 
-	if !lp.backfillFinalizedBlocks(ctx, &currentBlockNumber, latestBlockNumber) {
+	if lp.nextFinalizedBlockNum == 0 {
+		// If this is the first time we're being called, we most likely want to start
+		// backfilling at currentBlockNumber.  However, if the currentBlock is still
+		// unfinalized, we must go back a bit further, to the last finalized block, so that
+		// next time we're called any reorgs get handled properly.
+		lp.nextFinalizedBlockNum = mathutil.Min[int64](currentBlockNumber, latestBlockNumber-lp.finalityDepth)
+		if lp.nextFinalizedBlockNum < 0 { // just in case we're near genesis block
+			lp.nextFinalizedBlockNum = 0
+		}
+	}
+
+	if !lp.backfillFinalizedLogs(ctx, latestBlockNumber) {
 		return
 	}
-	if currentBlockNumber > currentBlock.Number {
-		// If we successfully backfilled we have logs up to and including lastSafeBackfillBlock,
-		// now load the first unfinalized block.
-		currentBlock, err = lp.getCurrentBlockMaybeHandleReorg(ctx, currentBlockNumber, nil)
+
+	if lp.nextFinalizedBlockNum >= currentBlockNumber {
+		// After backfilling, we should have logs up through the second-last finalized block.
+		// We need an individual request for each remaining unsaved block, including the last
+		// finalized block if we don't have it already.
+		currentBlockNumber = lp.nextFinalizedBlockNum
+	}
+
+	for {
+		// Possibly handle a reorg. For example if we crash, we'll be in the middle of processing unfinalized blocks.
+		// Returns (currentBlock || LCA+1 if reorg detected, error)
+		currentBlock, err = lp.getCurrentBlockMaybeHandleReorg(ctx, currentBlockNumber, currentBlock)
 		if err != nil {
 			// If there's an error handling the reorg, we can't be sure what state the db was left in.
 			// Resume from the latest block saved.
 			lp.lggr.Errorw("Unable to get current block", "err", err)
 			return
 		}
-	}
-
-	for {
+		currentBlockNumber = currentBlock.Number
 		h := currentBlock.Hash
 		var logs []types.Log
 		logs, err = lp.ec.FilterLogs(ctx, lp.filter(nil, nil, &h))
@@ -612,20 +598,12 @@ func (lp *logPoller) pollAndSavePendingLogs(ctx context.Context, currentBlockNum
 			lp.lggr.Warnw("Unable to save logs resuming from last saved block + 1", "err", err, "block", currentBlockNumber)
 			return
 		}
-		// Update current block.
-		// Same reorg detection on unfinalized blocks.
+		// Update current block number.
 		currentBlockNumber++
 		if currentBlockNumber > latestBlockNumber {
 			break
 		}
-		currentBlock, err = lp.getCurrentBlockMaybeHandleReorg(ctx, currentBlockNumber, nil)
-		if err != nil {
-			// If there's an error handling the reorg, we can't be sure what state the db was left in.
-			// Resume from the latest block saved.
-			lp.lggr.Errorw("Unable to get current block", "err", err)
-			return
-		}
-		currentBlockNumber = currentBlock.Number
+		currentBlock = nil
 	}
 }
 
