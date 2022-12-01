@@ -45,9 +45,15 @@ jobs:
         with:
           go-version-file: 'go.mod'
       - name: golangci-lint
-        uses: golangci/golangci-lint-action@v3
+        ##
+        # TODO: change this to an official action or a fork on the smartcontractkit GitHub org.
+        # Adding in order to support multiple --out-format args so we can generate a JSON file
+        # for SonarQube consumption.
+        ##
+        uses: chainchad/golangci-lint-action@
         # any scheduled run or push, but skip PRs from release branches
         if: github.event.schedule != '' || github.event_name == 'push' || (github.event_name == 'pull_request' && !startsWith(github.head_ref, 'release/'))
         with:
           version: v1.50.1
+          args: --out-format checkstyle:report.json
           only-new-issues: ${{github.event.schedule == ''}} # show only new issues, unless it's a scheduled run
