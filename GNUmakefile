@@ -154,6 +154,14 @@ test_perf: test_need_operator_assets ## Run core node performance tests.
 test_chaos: test_need_operator_assets ## Run core node chaos tests.
 	ginkgo -r --focus @chaos --nodes 5 ./integration-tests/chaos
 
+.PHONY: test_chaos_automation
+test_chaos_automation: test_need_operator_assets ## Run core node chaos tests.
+	ginkgo -r --focus @chaos-automation --nodes 5 ./integration-tests/chaos
+
+.PHONY: test_reorg_automation
+test_reorg_automation: test_need_operator_assets ## Run core node chaos tests.
+	ginkgo -r --focus @reorg-automation --nodes 1 ./integration-tests/reorg
+
 .PHONY: config-docs
 config-docs: ## Generate core node configuration documentation
 	go run ./core/config/v2/docs/cmd/generate/main.go -o ./docs/
