@@ -52,7 +52,7 @@ jobs:
         # Adding in order to support multiple --out-format args so we can generate a JSON file
         # for SonarQube consumption.
         ##
-        uses: chainchad/golangci-lint-action@
+        uses: chainchad/golangci-lint-action@137e0d2789c77699c5ec6fdd2a87eb75b8f184ea
         # any scheduled run or push, but skip PRs from release branches
         if: github.event.schedule != '' || github.event_name == 'push' || (github.event_name == 'pull_request' && !startsWith(github.head_ref, 'release/'))
         with:
