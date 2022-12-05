@@ -293,7 +293,6 @@ func (lp *logPoller) getReplayFromBlock(ctx context.Context, requested int64) (i
 func (lp *logPoller) run() {
 	defer close(lp.done)
 	logPollTick := time.After(0)
-	//logPollFinalizedTick := time.After(utils.WithJitter(lp.pollPeriod))
 	blockPruneTick := time.After(0)
 
 	for {
