@@ -372,6 +372,7 @@ replace github.com/btcsuite/btcd => github.com/btcsuite/btcd v0.22.1
 
 exclude (
 	github.com/influxdata/influxdb v1.8.3
+	github.com/labstack/echo/v4 v4.2.1
 	github.com/labstack/echo/v4 v4.5.0
 	github.com/nats-io/nats-server/v2 v2.1.2
 	github.com/nats-io/nats-server/v2 v2.5.0
