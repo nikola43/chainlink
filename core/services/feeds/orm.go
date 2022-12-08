@@ -34,6 +34,7 @@ type ORM interface {
 
 	CreateJobProposal(jp *JobProposal) (int64, error)
 	CountJobProposals() (int64, error)
+	CountJobProposalsByStatus() ([]int64, error)
 	GetJobProposal(id int64, qopts ...pg.QOpt) (*JobProposal, error)
 	GetJobProposalByRemoteUUID(uuid uuid.UUID) (*JobProposal, error)
 	ListJobProposals() (jps []JobProposal, err error)
@@ -312,6 +313,20 @@ func (o *orm) CountJobProposals() (count int64, err error) {
 
 	err = o.q.Get(&count, stmt)
 	return count, errors.Wrap(err, "CountJobProposals failed")
+}
+
+// CountJobProposals counts the number of job proposal records.
+func (o *orm) CountJobProposalsByStatus() (counts []int64, err error) {
+	stmt := `
+	SELECT 
+		COUNT(*) filter (where job_proposals.status = 'pending') as pending,
+		COUNT(*) filter (where job_proposals.status = 'approved') as approved,
+		COUNT(*) filter (where job_proposals.status = 'rejected') as rejected,
+		COUNT(*) filter (where job_proposals.status = 'cancelled') as cancelled
+	FROM job_proposals;`
+
+	err = o.q.Get(&counts, stmt)
+	return counts, errors.Wrap(err, "CountJobProposalsByStatus failed")
 }
 
 // GetJobProposal gets a job proposal by id.
